@@ -1,0 +1,4 @@
+_autocomplete() {
+	COMPREPLY=($(compgen -W "$($1 complete "${COMP_WORDS[@]:1}")" -- "$2"))
+}
+complete -F _autocomplete bj

@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# The code is provided for any purpose without restrictions and warranties.
+########################################################################################################################
+set -o errexit -o errtrace -o functrace -o noclobber -o nounset -o pipefail
+shopt -s extglob inherit_errexit lastpipe
+shopt -u extdebug
+########################################################################################################################
+__help() {
+	printf "\
+Usage:
+  ${Self} (enable|disable|edit|view|conf) PROGRAM
+  ${Self} list-(inst|conf)
+\nDescription:
+  Proof of concept wrapper for bubblewrap utility with individual profiles support.
+
+Warning! ${InstDir} must be in system \${PATH} to work.
+"
+}
+########################################################################################################################
+__complete() {
+	compgen -W "$(
+		case $# in
+			[01]) echo "${PubFn//complete}" ;;
+			*) case "$1" in
+					enable) __diff_exec ;;
+					disable) __list_inst ;;
+					conf|view) __list_conf_all ;;
+					edit) sort -mu <(__list_inst) <(__list_conf_all) ;;
+				esac ;;
+		esac
+	)" -- "${@: -1}"
+}
+########################################################################################################################
+main() {
+	readonly Self="${0##*/}"
+	readonly ConfDir=~/.config/bj
+	readonly InstDir=~/bin
+
+	die() { printf "$0: %s\n" "$@" >&2; exit 255; }
+	export LC_ALL=C # find, sort
+	readonly sed='sed --regexp-extended --sandbox'
+
+	if [[ "$0" == $(readlink -f -- "$0") ]]; then
+		readonly PubFn=$(declare -F |${sed} -n 's/^declare -f __([^_][^ ]*)/\1/;T;s/_/-/g;p' |xargs)
+		readonly Cond5="@(${PubFn// /|})" # requires extglob shopt
+		case "${1?missing argument}" in
+			$Cond5) __${1//-/_} "${@:2}"; exit 0 ;;
+			*) die "invalid argument: $1" ;;
+		esac
+	fi
+
+	(( EUID )) || die 'privilege escalation'
+
+	readonly Exec="$(__which "${Self}")"
+	[[ -e "${Exec}" ]] || die "missing executable: ${Self}"
+
+	readonly HomeDir=~/.app/"${CHHOME:-${Self}}"
+	[[ -d "${HomeDir}" ]] || mkdir -p -- "${HomeDir}"
+
+	if [[ -z ${DEBUG:=} ]]; then
+		cleanup(){ find "${HomeDir}" -ignore_readdir_race -empty -delete 2>/dev/null; }
+		trap cleanup ERR EXIT
+	else
+		readonly strace="$(__which strace)"
+		exec 2>&1 >/dev/null
+	fi
+	(exec bwrap \
+		--bind "${HomeDir}" ~/ \
+		--args 32 \
+		--ro-bind-data 14 /etc/passwd \
+		--ro-bind-data 15 /etc/group \
+		--die-with-parent \
+		--new-session \
+		${DEBUG:+ --ro-bind ${strace} ${strace} -- strace -qqq ${DEBUG:- -ffZe all}} \
+		-- "${Exec}" "$@" \
+	) \
+	14< <(getent passwd `id -u` 65534) \
+	15< <(getent group `id -g` 65534) \
+	32< <(__conf "${Self}" \
+		|${sed} 's%^%--%; s%(^|\s)~%\1${HOME}/%g' \
+		|env UID=`id -u` envsubst \
+		|tr '[:space:]' '\0' \
+	)
+}
+########################################################################################################################
+__conf() { : $1
+	cd "${ConfDir}"
+	[[ -e "$1" ]] || set -- @
+	declare -A Visited
+	parse_conf "$1"
+}
+parse_conf() { : $1
+	while IFS=$'\n' read -r; do
+		if [[ ${REPLY} =~ ^[[:blank:]]*(#|$) ]]; then
+			continue # ignore comment and empty lines
+		elif [[ ${REPLY} =~ ^\.\ ([[:graph:]]+)$ ]]; then
+			local File="${BASH_REMATCH[1]}" Func="${FUNCNAME[0]}"
+			Visited["$1"]=1
+			(( ${Visited[${File}]:-0} )) || "${Func}" "${File}"
+			continue
+		elif [[ ${REPLY} =~ ^((|dev-|ro-)bind(|-try))(( [[:graph:]]+){1,2})$ ]]; then
+			if [[ "${BASH_REMATCH[4]}" == "${BASH_REMATCH[5]}" ]]
+			then echo "${REPLY}${BASH_REMATCH[5]}"
+			else echo "${REPLY}"
+			fi
+			continue
+		elif \
+			[[ ${REPLY} =~ ^symlink(\ [[:graph:]]+){2}$ ]] || \
+			[[ ${REPLY} =~ ^(remount-ro|proc|dev|tmpfs|mqueue|dir)\ [[:graph:]]+$ ]] || \
+			[[ ${REPLY} =~ ^(|un)share-(user(|-try)|ipc|pid|net|uts|cgroup(|-try)|all)$ ]] || \
+			[[ ${REPLY} =~ ^(|un)setenv\ [_[:alnum:]]+\ [[:print:]]+$ ]] || \
+			[[ ${REPLY} =~ ^cap-(add|drop)\ CAP_[_[:alnum:]]+$ ]]
+		then
+			echo "${REPLY}"
+		else
+			die "invalid string: ${REPLY}"
+		fi
+	done < "$1" || die "can't read a file: $1"
+}
+########################################################################################################################
+__enable() { : $1
+	cd "${InstDir}"
+	which -- "$@" 2>&1 |${sed} -n 's%^which: no ([^ ]+) in .*%missing: \1%;T;p;q255' >&2
+	for Name in "$@"; do ln -snfv -- "${Self}" "${Name}" || Err=255; done
+	return ${Err:-0}
+}
+__disable() { : $1
+	cd "${InstDir}"
+	readlink -ev -- "$@" |${sed} -n "\%^${Self}$%b;p;q255" >&2
+	rm -fv -- "$@"
+}
+__edit() { : $1
+	cd "${ConfDir}"
+	readlink -fv -- "$@" |${sed} -n "\%^${ConfDir}/.+%b;p;q255" >&2
+	${EDITOR} -- "${@/#/${ConfDir}\/}"
+}
+__touch() { : $1
+	cd "${ConfDir}" #; touch -- "$@"
+	for File in "$@"; do [[ -e "$File" ]] || echo '. @' > "$File"; done
+}
+__view() { : $1
+	cd "${ConfDir}"
+	sed -r "
+		s%^[[:blank:]]*%%
+		/^(#|$)/d
+		s%[[:blank:]]*$%%
+#		s%(^|\s)~/%\1\$HOME/%g
+		\%^\. [[:graph:]]+$%b
+		\%^((|dev-|ro-)bind(|-try))(( [[:graph:]]+){1,2})$%b
+		\%^symlink( [[:graph:]]+){2}$%b
+		\%^(remount-ro|proc|dev|tmpfs|mqueue|dir) [[:graph:]]+$%b
+		\%^(|un)share-(user(|-try)|ipc|pid|net|uts|cgroup(|-try)|all)$%b
+		\%^(|un)setenv [_[:alnum:]]+ [[:print:]]+$%b
+		\%^cap-(add|drop) CAP_[_[:alnum:]]+$%b
+		s%^%parsing error: %w /dev/stderr
+		q255
+	" "$@"
+}
+########################################################################################################################
+__which() { readlink -f -- $(which --skip-tilde -- "$@" 2>/dev/null) 2>/dev/null; }
+
+__list_inst() {
+	find "${InstDir}" -maxdepth 1 -type l -printf '%l\t%f\n' 2>/dev/null |${sed} -n "s%^${Self}\t%%p" |sort -u
+}
+__list_conf() { find "${ConfDir}" -maxdepth 1 ! -type d ! -name '@*' -printf '%f\n' 2>/dev/null |sort -u; }
+__list_conf_all() { find "${ConfDir}" ! -type d -printf '%P\n' 2>/dev/null |sort -u; }
+__list_exec() { find ${PATH//:/ } -maxdepth 1 ! -type d -executable -printf '%f\n' 2>/dev/null |sort -u; }
+
+__diff() { comm -${1:-}3 <(__list_inst) <(__list_conf); }
+__diff_exec() { comm -13 <(__list_inst) <(__list_exec); }
+__diff_conf() { __diff 1; }
+__diff_inst() { __diff 2; }
+
+__fail_inst() {
+	set -- $(__list_inst)
+	while (($#)); do __which "$1" &>/dev/null || echo "$1"; shift; done
+}
+
+__repair() {
+	set -- $(__fail_inst); ((! $#)) || rm -fv -- "${@/#/${InstDir}\/}"
+#	set -- $(__diff_inst); ((! $#)) || __touch "$@"
+#	set -- $(__diff_conf); ((! $#)) || __enable "$@"
+}
+########################################################################################################################
+main "$@"

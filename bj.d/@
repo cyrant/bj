@@ -1,0 +1,52 @@
+cap-drop CAP_AUDIT_CONTROL
+cap-drop CAP_AUDIT_WRITE
+cap-drop CAP_MAC_ADMIN
+cap-drop CAP_MAC_OVERRIDE
+
+dev /dev
+dev-bind /dev/dri
+dev-bind-try /dev/nvidia-modeset
+dev-bind-try /dev/nvidia0
+dev-bind-try /dev/nvidia1
+dev-bind-try /dev/nvidiactl
+
+proc /proc
+
+ro-bind /sys/block
+ro-bind /sys/bus
+ro-bind /sys/class
+ro-bind /sys/dev
+ro-bind /sys/devices
+
+symlink usr/bin /bin
+symlink usr/bin /sbin
+symlink usr/lib /lib
+symlink usr/lib /lib64
+ro-bind /usr
+
+ro-bind /etc
+
+dir /run
+#ro-bind /run/mount
+bind-try /run/user/$UID/bus
+bind-try /run/user/$UID/dconf
+bind-try /run/user/$UID/pulse
+bind-try /run/user/$UID/ICEauthority
+bind-try /run/user/$UID/Xauthority
+
+dir /tmp
+ro-bind-try /tmp/.X11-unix
+
+dir /var
+bind-try ~/.cache/fontconfig
+bind-try ~/.cache/mesa_shader_cache
+bind-try ~/.config/pulse/cookie
+bind-try ~/.nv/GLCache
+bind-try ~/.Xauthority
+
+setenv DBUS_SESSION_BUS_ADDRESS unix:path=/run/user/$UID/bus
+setenv NO_AT_BRIDGE 1
+
+unshare-ipc
+unshare-net
+unshare-pid
