@@ -1,0 +1,3 @@
+bind-try ~/Music
+setenv XDG_MUSIC_DIR ~/Music
+

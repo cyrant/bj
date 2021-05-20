@@ -1,0 +1,5 @@
+bind-try ~/Documents
+bind-try ~/Templates
+setenv XDG_DOCUMENTS_DIR ~/Documents
+setenv XDG_TEMPLATES_DIR ~/Templates
+
